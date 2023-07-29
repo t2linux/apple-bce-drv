@@ -2,6 +2,7 @@
 #include <linux/module.h>
 #include <linux/crc32.h>
 #include "audio/audio.h"
+#include <linux/version.h>
 
 static dev_t bce_chrdev;
 static struct class *bce_class;
@@ -392,7 +393,11 @@ static int __init apple_bce_module_init(void)
     int result;
     if ((result = alloc_chrdev_region(&bce_chrdev, 0, 1, "apple-bce")))
         goto fail_chrdev;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
     bce_class = class_create(THIS_MODULE, "apple-bce");
+#else
+    bce_class = class_create("apple-bce");
+#endif
     if (IS_ERR(bce_class)) {
         result = PTR_ERR(bce_class);
         goto fail_class;

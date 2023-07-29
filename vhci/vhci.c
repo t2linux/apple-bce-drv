@@ -730,7 +730,11 @@ int __init bce_vhci_module_init(void)
     int result;
     if ((result = alloc_chrdev_region(&bce_vhci_chrdev, 0, 1, "bce-vhci")))
         goto fail_chrdev;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
     bce_vhci_class = class_create(THIS_MODULE, "bce-vhci");
+#else
+    bce_vhci_class = class_create("bce-vhci");
+#endif
     if (IS_ERR(bce_vhci_class)) {
         result = PTR_ERR(bce_vhci_class);
         goto fail_class;

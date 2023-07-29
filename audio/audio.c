@@ -8,6 +8,7 @@
 #include <sound/jack.h>
 #include "audio.h"
 #include "pcm.h"
+#include <linux/version.h>
 
 static int aaudio_alsa_index = SNDRV_DEFAULT_IDX1;
 static char *aaudio_alsa_id = SNDRV_DEFAULT_STR1;
@@ -125,8 +126,6 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
             struct snd_pcm_hardware *hw = sdev->out_streams[0].alsa_hw_desc;
 
             snprintf(aaudio->card->driver, sizeof(aaudio->card->driver) / sizeof(char), "AppleT2x%d", hw->channels_min);
-
-            break;
         }
     }
 
@@ -664,7 +663,11 @@ int aaudio_module_init(void)
     int result;
     if ((result = alloc_chrdev_region(&aaudio_chrdev, 0, 1, "aaudio")))
         goto fail_chrdev;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,4,0)
     aaudio_class = class_create(THIS_MODULE, "aaudio");
+#else
+    aaudio_class = class_create("aaudio");
+#endif
     if (IS_ERR(aaudio_class)) {
         result = PTR_ERR(aaudio_class);
         goto fail_class;
