@@ -44,5 +44,9 @@ void __exit bce_vhci_module_exit(void);
 
 int bce_vhci_create(struct apple_bce_device *dev, struct bce_vhci *vhci);
 void bce_vhci_destroy(struct bce_vhci *vhci);
+int bce_vhci_start(struct usb_hcd *hcd);
+void bce_vhci_stop(struct usb_hcd *hcd);
+
+struct bce_vhci *bce_vhci_from_hcd(struct usb_hcd *hcd);
 
 #endif //BCE_VHCI_H

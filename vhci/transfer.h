@@ -61,6 +61,8 @@ void bce_vhci_create_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_trans
         struct usb_host_endpoint *endp, bce_vhci_device_t dev_addr, enum dma_data_direction dir);
 void bce_vhci_destroy_transfer_queue(struct bce_vhci *vhci, struct bce_vhci_transfer_queue *q);
 void bce_vhci_transfer_queue_event(struct bce_vhci_transfer_queue *q, struct bce_vhci_message *msg);
+int bce_vhci_transfer_queue_do_pause(struct bce_vhci_transfer_queue *q);
+int bce_vhci_transfer_queue_do_resume(struct bce_vhci_transfer_queue *q);
 int bce_vhci_transfer_queue_pause(struct bce_vhci_transfer_queue *q, enum bce_vhci_pause_source src);
 int bce_vhci_transfer_queue_resume(struct bce_vhci_transfer_queue *q, enum bce_vhci_pause_source src);
 void bce_vhci_transfer_queue_request_reset(struct bce_vhci_transfer_queue *q);

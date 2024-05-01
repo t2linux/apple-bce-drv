@@ -113,6 +113,8 @@ struct aaudio_device {
 };
 
 void aaudio_handle_notification(struct aaudio_device *a, struct aaudio_msg *msg);
+void aaudio_handle_prop_change_work(struct work_struct *ws);
+void aaudio_handle_cmd_timestamp(struct aaudio_device *a, struct aaudio_msg *msg);
 void aaudio_handle_command(struct aaudio_device *a, struct aaudio_msg *msg);
 
 int aaudio_module_init(void);
