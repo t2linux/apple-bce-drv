@@ -334,32 +334,48 @@ static int bce_vhci_bus_suspend(struct usb_hcd *hcd)
     pr_info("bce_vhci: suspend started\n");
 
     pr_info("bce_vhci: suspend endpoints\n");
-    for (i = 0; i < 16; i++) {
-        if (!vhci->port_to_device[i])
+    for (i = 0; i != 4; i++) {
+        pr_info("bce_vhci: checking port %d\n", i);
+        if (!vhci->port_to_device[i]) {
+            pr_info("bce_vhci: port %d has no device\n", i);
             continue;
-        for (j = 0; j < 32; j++) {
-            if (!(vhci->devices[vhci->port_to_device[i]]->tq_mask & BIT(j)))
+        }
+        for (j = 0; j != 18; j++) {
+            pr_info("bce_vhci: checking transfer queue %d for port %d\n", j, i);
+            if (!(vhci->devices[vhci->port_to_device[i]]->tq_mask & BIT(j))) {
+                pr_info("bce_vhci: transfer queue %d not active for port %d\n", j, i);
                 continue;
+            }
+            pr_info("bce_vhci: pausing transfer queue %d for port %d\n", j, i);
             bce_vhci_transfer_queue_pause(&vhci->devices[vhci->port_to_device[i]]->tq[j],
-                    BCE_VHCI_PAUSE_SUSPEND);
+                                          BCE_VHCI_PAUSE_SUSPEND);
         }
     }
-
     pr_info("bce_vhci: suspend ports\n");
-    for (i = 0; i < 16; i++) {
-        if (!vhci->port_to_device[i])
+    for (i = 0; i != 4; i++) {
+        pr_info("bce_vhci: checking port %d for suspend\n", i);
+        if (!vhci->port_to_device[i]) {
+            pr_info("bce_vhci: port %d has no device\n", i);
             continue;
+        }
+        pr_info("bce_vhci: suspending port %d\n", i);
         bce_vhci_cmd_port_suspend(&vhci->cq, i);
     }
-    pr_info("bce_vhci: suspend controller\n");
-    if ((status = bce_vhci_cmd_controller_pause(&vhci->cq)))
-        return status;
 
+    pr_info("bce_vhci: suspend controller\n");
+    status = bce_vhci_cmd_controller_pause(&vhci->cq);
+    if (status) {
+        pr_info("bce_vhci: failed to suspend controller, error %d\n", status);
+        return status;
+    }
+
+    pr_info("bce_vhci: pausing event queues\n");
     bce_vhci_event_queue_pause(&vhci->ev_commands);
     bce_vhci_event_queue_pause(&vhci->ev_system);
     bce_vhci_event_queue_pause(&vhci->ev_isochronous);
     bce_vhci_event_queue_pause(&vhci->ev_interrupt);
     bce_vhci_event_queue_pause(&vhci->ev_asynchronous);
+    
     pr_info("bce_vhci: suspend done\n");
     return 0;
 }
@@ -371,6 +387,7 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
     struct bce_vhci *vhci = bce_vhci_from_hcd(hcd);
     pr_info("bce_vhci: resume started\n");
 
+    pr_info("bce_vhci: resuming event queues\n");
     bce_vhci_event_queue_resume(&vhci->ev_system);
     bce_vhci_event_queue_resume(&vhci->ev_isochronous);
     bce_vhci_event_queue_resume(&vhci->ev_interrupt);
@@ -378,24 +395,38 @@ static int bce_vhci_bus_resume(struct usb_hcd *hcd)
     bce_vhci_event_queue_resume(&vhci->ev_commands);
 
     pr_info("bce_vhci: resume controller\n");
-    if ((status = bce_vhci_cmd_controller_start(&vhci->cq)))
+    status = bce_vhci_cmd_controller_start(&vhci->cq);
+    if (status) {
+        pr_info("bce_vhci: failed to resume controller, error %d\n", status);
         return status;
+    }
 
     pr_info("bce_vhci: resume ports\n");
-    for (i = 0; i < 16; i++) {
-        if (!vhci->port_to_device[i])
+    for (i = 0; i != 4; i++) {
+        pr_info("bce_vhci: checking port %d for resume\n", i);
+        if (!vhci->port_to_device[i]) {
+            pr_info("bce_vhci: port %d has no device\n", i);
             continue;
+        }
+        pr_info("bce_vhci: resuming port %d\n", i);
         bce_vhci_cmd_port_resume(&vhci->cq, i);
     }
+
     pr_info("bce_vhci: resume endpoints\n");
-    for (i = 0; i < 16; i++) {
-        if (!vhci->port_to_device[i])
+    for (i = 0; i != 4; i++) {
+        pr_info("bce_vhci: checking port %d for endpoints\n", i);
+        if (!vhci->port_to_device[i]) {
+            pr_info("bce_vhci: port %d has no device\n", i);
             continue;
-        for (j = 0; j < 32; j++) {
-            if (!(vhci->devices[vhci->port_to_device[i]]->tq_mask & BIT(j)))
+        }
+        for (j = 0; j != 18; j++) {
+            pr_info("bce_vhci: checking transfer queue %d for port %d\n", j, i);
+            if (!(vhci->devices[vhci->port_to_device[i]]->tq_mask & BIT(j))) {
+                pr_info("bce_vhci: transfer queue %d not active for port %d\n", j, i);
                 continue;
-            bce_vhci_transfer_queue_resume(&vhci->devices[vhci->port_to_device[i]]->tq[j],
-                    BCE_VHCI_PAUSE_SUSPEND);
+            }
+            pr_info("bce_vhci: resuming transfer queue %d for port %d\n", j, i);
+            bce_vhci_transfer_queue_resume(&vhci->devices[vhci->port_to_device[i]]->tq[j],BCE_VHCI_PAUSE_SUSPEND);
         }
     }
 
