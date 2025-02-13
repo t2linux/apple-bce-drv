@@ -240,7 +240,11 @@ static int bce_vhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
     return 0;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,8,0)
+static int bce_vhci_address_device(struct usb_hcd *hcd, struct usb_device *udev)
+#else
 static int bce_vhci_address_device(struct usb_hcd *hcd, struct usb_device *udev, unsigned int timeout_ms) //TODO: follow timeout
+#endif
 {
     /* This is the same as enable_device, but instead in the old scheme */
     return bce_vhci_enable_device(hcd, udev);
