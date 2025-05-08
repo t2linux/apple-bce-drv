@@ -1,6 +1,7 @@
 #include "mailbox.h"
 #include <linux/atomic.h>
 #include "apple_bce.h"
+#include <linux/version.h>
 
 #define REG_MBOX_OUT_BASE 0x820
 #define REG_MBOX_REPLY_COUNTER 0x108
@@ -121,8 +122,11 @@ void bce_timestamp_stop(struct bce_timestamp *ts)
     spin_lock_irqsave(&ts->stop_sl, flags);
     ts->stopped = true;
     spin_unlock_irqrestore(&ts->stop_sl, flags);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,15,0)
     del_timer_sync(&ts->timer);
-
+#else
+    timer_delete_sync(&ts->timer);
+#endif
     iowrite32((u32) -2, regb + 2);
     iowrite32((u32) -1, regb);
 }
