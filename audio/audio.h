@@ -110,6 +110,7 @@ struct aaudio_device {
     int next_alsa_id;
 
     struct completion remote_alive;
+    struct workqueue_struct *timestamp_wq;
 };
 
 void aaudio_handle_notification(struct aaudio_device *a, struct aaudio_msg *msg);

@@ -210,7 +210,6 @@ static snd_pcm_uframes_t aaudio_pcm_pointer(struct snd_pcm_substream *substream)
     snd_pcm_sframes_t buffer_time_length;
 
     if (!stream->started || stream->waiting_for_first_ts) {
-        pr_warn("aaudio_pcm_pointer while not started\n");
         return 0;
     }
 
@@ -285,6 +284,10 @@ static void aaudio_handle_stream_timestamp(struct snd_pcm_substream *substream, 
 
     stream = aaudio_pcm_stream(substream);
     snd_pcm_stream_lock_irqsave(substream, flags);
+    if (!stream->started) {
+        snd_pcm_stream_unlock_irqrestore(substream, flags);
+        return;
+    }
     stream->remote_timestamp = timestamp;
     if (stream->waiting_for_first_ts) {
         stream->waiting_for_first_ts = false;
@@ -301,7 +304,7 @@ void aaudio_handle_timestamp(struct aaudio_subdevice *sdev, ktime_t os_timestamp
 
     substream = sdev->pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream;
     if (substream)
-        aaudio_handle_stream_timestamp(substream, dev_timestamp);
+        aaudio_handle_stream_timestamp(substream, os_timestamp);
     substream = sdev->pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream;
     if (substream)
         aaudio_handle_stream_timestamp(substream, os_timestamp);

@@ -95,6 +95,7 @@ int __aaudio_send_cmd_sync(struct aaudio_bce *b, struct aaudio_send_ctx *ctx, st
     DECLARE_COMPLETION_ONSTACK(cmpl);
     ent.msg = reply;
     ent.cmpl = &cmpl;
+    clear_bit(ctx->tag_n, b->timed_out_tags);
     b->pending_entries[ctx->tag_n] = &ent;
     __aaudio_send(b, ctx); /* unlocks the spinlock */
     ctx->timeout = wait_for_completion_timeout(&cmpl, ctx->timeout);
@@ -102,9 +103,12 @@ int __aaudio_send_cmd_sync(struct aaudio_bce *b, struct aaudio_send_ctx *ctx, st
         /* Remove the pending queue entry; this will be normally handled by the completion route but
          * during a timeout it won't */
         spin_lock_irqsave(&b->spinlock, ctx->irq_flags);
-        if (b->pending_entries[ctx->tag_n] == &ent)
+        if (b->pending_entries[ctx->tag_n] == &ent) {
             b->pending_entries[ctx->tag_n] = NULL;
+            set_bit(ctx->tag_n, b->timed_out_tags);
+        }
         spin_unlock_irqrestore(&b->spinlock, ctx->irq_flags);
+        pr_warn_ratelimited("aaudio_send_cmd_sync: timeout waiting for tag S%03d\n", ctx->tag_n);
         return -ETIMEDOUT;
     }
     return 0;
@@ -133,12 +137,15 @@ static void aaudio_handle_reply(struct aaudio_bce *b, struct aaudio_msg *reply)
     spin_lock_irqsave(&b->spinlock, irq_flags);
     entry = b->pending_entries[tagn];
     if (entry) {
+        clear_bit(tagn, b->timed_out_tags);
         if (reply->size < entry->msg->size)
             entry->msg->size = reply->size;
         memcpy(entry->msg->data, reply->data, entry->msg->size);
         complete(entry->cmpl);
 
         b->pending_entries[tagn] = NULL;
+    } else if (test_and_clear_bit(tagn, b->timed_out_tags)) {
+        pr_debug("aaudio_handle_reply: Late reply for timed-out tag: %.4s\n", tag);
     } else {
         pr_err("aaudio_handle_reply: No queued item found for tag: %.4s\n", tag);
     }

@@ -2,6 +2,7 @@
 #include <linux/spinlock.h>
 #include <linux/module.h>
 #include <linux/random.h>
+#include <linux/workqueue.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -20,6 +21,17 @@ static int aaudio_init_cmd(struct aaudio_device *a);
 static int aaudio_init_bs(struct aaudio_device *a);
 static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id);
 static void aaudio_free_dev(struct aaudio_subdevice *sdev);
+static void aaudio_handle_timestamp_work(struct work_struct *ws);
+static void aaudio_queue_timestamp_work(struct aaudio_device *a, aaudio_device_id_t devid,
+                                        ktime_t os_timestamp, u64 dev_timestamp);
+
+struct aaudio_timestamp_work_struct {
+    struct work_struct ws;
+    struct aaudio_device *a;
+    aaudio_device_id_t devid;
+    ktime_t os_timestamp;
+    u64 dev_timestamp;
+};
 
 static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
@@ -63,6 +75,11 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
     device_link_add(aaudio->dev, aaudio->bce->dev, DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_CONSUMER);
 
     init_completion(&aaudio->remote_alive);
+    aaudio->timestamp_wq = alloc_ordered_workqueue("aaudio_timestamp", WQ_MEM_RECLAIM);
+    if (!aaudio->timestamp_wq) {
+        status = -ENOMEM;
+        goto fail;
+    }
     INIT_LIST_HEAD(&aaudio->subdevice_list);
 
     /* Init: set an unknown flag in the bitset */
@@ -134,6 +151,8 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 fail_snd:
     snd_card_free(aaudio->card);
 fail:
+    if (aaudio && aaudio->timestamp_wq)
+        destroy_workqueue(aaudio->timestamp_wq);
     if (aaudio && aaudio->dev)
         device_destroy(aaudio_class, aaudio->devt);
     kfree(aaudio);
@@ -158,6 +177,8 @@ static void aaudio_remove(struct pci_dev *dev)
     struct aaudio_subdevice *sdev;
     struct aaudio_device *aaudio = pci_get_drvdata(dev);
 
+    if (aaudio->timestamp_wq)
+        destroy_workqueue(aaudio->timestamp_wq);
     snd_card_free(aaudio->card);
     while (!list_empty(&aaudio->subdevice_list)) {
         sdev = list_first_entry(&aaudio->subdevice_list, struct aaudio_subdevice, list);
@@ -177,6 +198,8 @@ static int aaudio_suspend(struct device *dev)
 {
     struct aaudio_device *aaudio = pci_get_drvdata(to_pci_dev(dev));
 
+    if (aaudio->timestamp_wq)
+        flush_workqueue(aaudio->timestamp_wq);
     if (aaudio_cmd_set_remote_access(aaudio, AAUDIO_REMOTE_ACCESS_OFF))
         dev_warn(aaudio->dev, "Failed to reset remote access\n");
 
@@ -611,16 +634,54 @@ void aaudio_handle_cmd_timestamp(struct aaudio_device *a, struct aaudio_msg *msg
 {
     ktime_t time_os = ktime_get_boottime();
     struct aaudio_send_ctx sctx;
-    struct aaudio_subdevice *sdev;
     u64 devid, timestamp, update_seed;
     aaudio_msg_read_update_timestamp(msg, &devid, &timestamp, &update_seed);
     dev_dbg(a->dev, "Received timestamp update for dev=%llx ts=%llx seed=%llx\n", devid, timestamp, update_seed);
 
-    sdev = aaudio_find_dev_by_dev_id(a, devid);
-    aaudio_handle_timestamp(sdev, time_os, timestamp);
-
     aaudio_send_cmd_response(a, &sctx, msg,
             aaudio_msg_write_update_timestamp_response);
+    aaudio_queue_timestamp_work(a, devid, time_os, timestamp);
+}
+
+static void aaudio_handle_timestamp_work(struct work_struct *ws)
+{
+    struct aaudio_timestamp_work_struct *work =
+        container_of(ws, struct aaudio_timestamp_work_struct, ws);
+    struct aaudio_subdevice *sdev;
+
+    sdev = aaudio_find_dev_by_dev_id(work->a, work->devid);
+    if (!sdev) {
+        dev_dbg(work->a->dev, "Timestamp update for unknown device id=%llx\n", work->devid);
+        goto out;
+    }
+    aaudio_handle_timestamp(sdev, work->os_timestamp, work->dev_timestamp);
+
+out:
+    kfree(work);
+}
+
+static void aaudio_queue_timestamp_work(struct aaudio_device *a, aaudio_device_id_t devid,
+                                        ktime_t os_timestamp, u64 dev_timestamp)
+{
+    struct aaudio_timestamp_work_struct *work;
+
+    if (!a->timestamp_wq)
+        return;
+
+    work = kmalloc(sizeof(*work), GFP_ATOMIC);
+    if (!work) {
+        dev_warn_ratelimited(a->dev, "Dropping timestamp update due to OOM\n");
+        return;
+    }
+
+    INIT_WORK(&work->ws, aaudio_handle_timestamp_work);
+    work->a = a;
+    work->devid = devid;
+    work->os_timestamp = os_timestamp;
+    work->dev_timestamp = dev_timestamp;
+
+    if (!queue_work(a->timestamp_wq, &work->ws))
+        kfree(work);
 }
 
 void aaudio_handle_command(struct aaudio_device *a, struct aaudio_msg *msg)
