@@ -3,6 +3,7 @@
 
 #include "protocol.h"
 #include "../queue.h"
+#include <linux/bitmap.h>
 
 #define AAUDIO_BCE_QUEUE_ELEMENT_SIZE 0x1000
 #define AAUDIO_BCE_QUEUE_ELEMENT_COUNT 20
@@ -29,6 +30,7 @@ struct aaudio_bce {
     struct aaudio_bce_queue qout;
     int tag_num;
     struct aaudio_bce_queue_entry *pending_entries[AAUDIO_BCE_QUEUE_TAG_COUNT];
+    unsigned long timed_out_tags[BITS_TO_LONGS(AAUDIO_BCE_QUEUE_TAG_COUNT)];
     struct spinlock spinlock;
 };
 
