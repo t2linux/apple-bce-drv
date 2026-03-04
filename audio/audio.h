@@ -10,9 +10,9 @@
 #define AAUDIO_SIG 0x19870423
 
 #define AAUDIO_DEVICE_MAX_UID_LEN 128
-#define AAUDIO_DEVICE_MAX_INPUT_STREAMS 1
-#define AAUDIO_DEVICE_MAX_OUTPUT_STREAMS 1
-#define AAUDIO_DEVICE_MAX_BUFFER_COUNT 1
+#define AAUDIO_DEIVCE_MAX_INPUT_STREAMS 1
+#define AAUDIO_DEIVCE_MAX_OUTPUT_STREAMS 1
+#define AAUDIO_DEIVCE_MAX_BUFFER_COUNT 1
 
 #define AAUDIO_BUFFER_ID_NONE 0xffu
 
@@ -77,9 +77,9 @@ struct aaudio_subdevice {
     int alsa_id;
     char uid[AAUDIO_DEVICE_MAX_UID_LEN + 1];
     size_t in_stream_cnt;
-    struct aaudio_stream in_streams[AAUDIO_DEVICE_MAX_INPUT_STREAMS];
+    struct aaudio_stream in_streams[AAUDIO_DEIVCE_MAX_INPUT_STREAMS];
     size_t out_stream_cnt;
-    struct aaudio_stream out_streams[AAUDIO_DEVICE_MAX_OUTPUT_STREAMS];
+    struct aaudio_stream out_streams[AAUDIO_DEIVCE_MAX_OUTPUT_STREAMS];
     bool is_pcm;
     struct snd_pcm *pcm;
     struct snd_jack *jack;
@@ -110,6 +110,9 @@ struct aaudio_device {
     int next_alsa_id;
 
     struct completion remote_alive;
+    struct work_struct resume_work;
+    struct workqueue_struct *timestamp_wq;
+    bool alive;
 };
 
 void aaudio_handle_notification(struct aaudio_device *a, struct aaudio_msg *msg);

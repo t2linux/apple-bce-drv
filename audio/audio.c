@@ -2,6 +2,7 @@
 #include <linux/spinlock.h>
 #include <linux/module.h>
 #include <linux/random.h>
+#include <linux/workqueue.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -20,6 +21,73 @@ static int aaudio_init_cmd(struct aaudio_device *a);
 static int aaudio_init_bs(struct aaudio_device *a);
 static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id);
 static void aaudio_free_dev(struct aaudio_subdevice *sdev);
+static void aaudio_resume_work(struct work_struct *ws);
+static void aaudio_handle_jack_connection_change(struct aaudio_subdevice *sdev);
+static void aaudio_handle_timestamp_work(struct work_struct *ws);
+static void aaudio_queue_timestamp_work(struct aaudio_device *a, aaudio_device_id_t devid,
+                                        ktime_t os_timestamp, u64 dev_timestamp);
+
+struct aaudio_timestamp_work_struct {
+    struct work_struct ws;
+    struct aaudio_device *a;
+    aaudio_device_id_t devid;
+    ktime_t os_timestamp;
+    u64 dev_timestamp;
+};
+
+static void aaudio_resume_work(struct work_struct *ws)
+{
+    struct aaudio_device *a = container_of(ws, struct aaudio_device, resume_work);
+    u32 ver, sig;
+    struct aaudio_subdevice *sdev;
+    struct aaudio_send_ctx sctx;
+
+    dev_info(a->dev, "aaudio: deferred resume starting\n");
+
+    ver = ioread32(&a->reg_mem_gpr[0]);
+    sig = ioread32(&a->reg_mem_gpr[1]);
+    if (ver < 3 || sig != AAUDIO_SIG) {
+        dev_err(a->dev, "aaudio: GPR validation failed (ver=%u, sig=0x%x)\n", ver, sig);
+        goto out;
+    }
+
+    reinit_completion(&a->remote_alive);
+    if (aaudio_send(a, &sctx, 500, aaudio_msg_write_alive_notification, 1, 3)) {
+        dev_err(a->dev, "aaudio: resume alive notification send failed\n");
+        goto out;
+    }
+
+    if (wait_for_completion_timeout(&a->remote_alive, msecs_to_jiffies(500)) == 0)
+        dev_warn(a->dev, "aaudio: resume alive response timed out\n");
+
+    if (aaudio_cmd_set_remote_access_timeout(a, AAUDIO_REMOTE_ACCESS_ON, 500)) {
+        dev_err(a->dev, "aaudio: resume SET_REMOTE_ACCESS(ON) failed\n");
+        goto out;
+    }
+
+    list_for_each_entry(sdev, &a->subdevice_list, list) {
+        if (sdev->in_stream_cnt == 1 && sdev->buf_id != AAUDIO_BUFFER_ID_NONE) {
+            if (aaudio_cmd_set_input_stream_address_ranges(a, sdev->dev_id))
+                dev_warn(a->dev, "aaudio: resume re-register input ranges for %s failed\n",
+                         sdev->uid);
+        }
+    }
+
+    list_for_each_entry(sdev, &a->subdevice_list, list) {
+        if (sdev->jack) {
+            aaudio_cmd_property_listener(a, sdev->dev_id, sdev->dev_id,
+                    AAUDIO_PROP(AAUDIO_PROP_SCOPE_OUTPUT, AAUDIO_PROP_JACK_PLUGGED, 0));
+            aaudio_handle_jack_connection_change(sdev);
+        }
+    }
+
+    a->alive = true;
+    dev_info(a->dev, "aaudio: deferred resume complete\n");
+    return;
+
+out:
+    dev_err(a->dev, "aaudio: deferred resume failed, audio may not work\n");
+}
 
 static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
@@ -53,16 +121,23 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
     aaudio->pci = dev;
     pci_set_drvdata(dev, aaudio);
-
     aaudio->devt = aaudio_chrdev;
     aaudio->dev = device_create(aaudio_class, &dev->dev, aaudio->devt, NULL, "aaudio");
     if (IS_ERR_OR_NULL(aaudio->dev)) {
         status = PTR_ERR(aaudio_class);
         goto fail;
     }
-    device_link_add(aaudio->dev, aaudio->bce->dev, DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_CONSUMER);
+    device_link_add(&aaudio->pci->dev, &aaudio->bce->pci->dev,
+            DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_CONSUMER);
 
     init_completion(&aaudio->remote_alive);
+    INIT_WORK(&aaudio->resume_work, aaudio_resume_work);
+    aaudio->timestamp_wq = alloc_ordered_workqueue("aaudio_timestamp", WQ_MEM_RECLAIM);
+    if (!aaudio->timestamp_wq) {
+        status = -ENOMEM;
+        goto fail;
+    }
+    aaudio->alive = true;
     INIT_LIST_HEAD(&aaudio->subdevice_list);
 
     /* Init: set an unknown flag in the bitset */
@@ -134,6 +209,8 @@ static int aaudio_probe(struct pci_dev *dev, const struct pci_device_id *id)
 fail_snd:
     snd_card_free(aaudio->card);
 fail:
+    if (aaudio && aaudio->timestamp_wq)
+        destroy_workqueue(aaudio->timestamp_wq);
     if (aaudio && aaudio->dev)
         device_destroy(aaudio_class, aaudio->devt);
     kfree(aaudio);
@@ -158,6 +235,10 @@ static void aaudio_remove(struct pci_dev *dev)
     struct aaudio_subdevice *sdev;
     struct aaudio_device *aaudio = pci_get_drvdata(dev);
 
+    cancel_work_sync(&aaudio->resume_work);
+    aaudio->alive = false;
+    if (aaudio->timestamp_wq)
+        destroy_workqueue(aaudio->timestamp_wq);
     snd_card_free(aaudio->card);
     while (!list_empty(&aaudio->subdevice_list)) {
         sdev = list_first_entry(&aaudio->subdevice_list, struct aaudio_subdevice, list);
@@ -177,8 +258,10 @@ static int aaudio_suspend(struct device *dev)
 {
     struct aaudio_device *aaudio = pci_get_drvdata(to_pci_dev(dev));
 
-    if (aaudio_cmd_set_remote_access(aaudio, AAUDIO_REMOTE_ACCESS_OFF))
-        dev_warn(aaudio->dev, "Failed to reset remote access\n");
+    cancel_work_sync(&aaudio->resume_work);
+    if (aaudio->timestamp_wq)
+        flush_workqueue(aaudio->timestamp_wq);
+    aaudio->alive = false;
 
     pci_disable_device(aaudio->pci);
     return 0;
@@ -192,12 +275,8 @@ static int aaudio_resume(struct device *dev)
     if ((status = pci_enable_device(aaudio->pci)))
         return status;
     pci_set_master(aaudio->pci);
-
-    if ((status = aaudio_cmd_set_remote_access(aaudio, AAUDIO_REMOTE_ACCESS_ON))) {
-        dev_err(aaudio->dev, "Failed to set remote access\n");
-        return status;
-    }
-
+    aaudio->alive = true;
+    schedule_work(&aaudio->resume_work);
     return 0;
 }
 
@@ -272,10 +351,10 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
         dev_err(a->dev, "Failed to get input stream list for device %llx\n", dev_id);
         goto fail;
     }
-    if (stream_cnt > AAUDIO_DEVICE_MAX_INPUT_STREAMS) {
+    if (stream_cnt > AAUDIO_DEIVCE_MAX_INPUT_STREAMS) {
         dev_warn(a->dev, "Device %s input stream count %llu is larger than the supported count of %u\n",
-                sdev->uid, stream_cnt, AAUDIO_DEVICE_MAX_INPUT_STREAMS);
-        stream_cnt = AAUDIO_DEVICE_MAX_INPUT_STREAMS;
+                sdev->uid, stream_cnt, AAUDIO_DEIVCE_MAX_INPUT_STREAMS);
+        stream_cnt = AAUDIO_DEIVCE_MAX_INPUT_STREAMS;
     }
     sdev->in_stream_cnt = stream_cnt;
     for (i = 0; i < stream_cnt; i++) {
@@ -289,10 +368,10 @@ static void aaudio_init_dev(struct aaudio_device *a, aaudio_device_id_t dev_id)
         dev_err(a->dev, "Failed to get output stream list for device %llx\n", dev_id);
         goto fail;
     }
-    if (stream_cnt > AAUDIO_DEVICE_MAX_OUTPUT_STREAMS) {
-        dev_warn(a->dev, "Device %s output stream count %llu is larger than the supported count of %u\n",
-                 sdev->uid, stream_cnt, AAUDIO_DEVICE_MAX_OUTPUT_STREAMS);
-        stream_cnt = AAUDIO_DEVICE_MAX_OUTPUT_STREAMS;
+    if (stream_cnt > AAUDIO_DEIVCE_MAX_OUTPUT_STREAMS) {
+        dev_warn(a->dev, "Device %s input stream count %llu is larger than the supported count of %u\n",
+                 sdev->uid, stream_cnt, AAUDIO_DEIVCE_MAX_OUTPUT_STREAMS);
+        stream_cnt = AAUDIO_DEIVCE_MAX_OUTPUT_STREAMS;
     }
     sdev->out_stream_cnt = stream_cnt;
     for (i = 0; i < stream_cnt; i++) {
@@ -454,10 +533,10 @@ static void aaudio_init_bs_stream(struct aaudio_device *a, struct aaudio_stream 
 {
     size_t i;
     strm->buffer_cnt = bs_strm->num_buffers;
-    if (bs_strm->num_buffers > AAUDIO_DEVICE_MAX_BUFFER_COUNT) {
+    if (bs_strm->num_buffers > AAUDIO_DEIVCE_MAX_BUFFER_COUNT) {
         dev_warn(a->dev, "BufferStruct buffer count %u exceeds driver limit of %u\n", bs_strm->num_buffers,
-                AAUDIO_DEVICE_MAX_BUFFER_COUNT);
-        strm->buffer_cnt = AAUDIO_DEVICE_MAX_BUFFER_COUNT;
+                AAUDIO_DEIVCE_MAX_BUFFER_COUNT);
+        strm->buffer_cnt = AAUDIO_DEIVCE_MAX_BUFFER_COUNT;
     }
     if (!strm->buffer_cnt)
         return;
@@ -611,16 +690,57 @@ void aaudio_handle_cmd_timestamp(struct aaudio_device *a, struct aaudio_msg *msg
 {
     ktime_t time_os = ktime_get_boottime();
     struct aaudio_send_ctx sctx;
-    struct aaudio_subdevice *sdev;
     u64 devid, timestamp, update_seed;
     aaudio_msg_read_update_timestamp(msg, &devid, &timestamp, &update_seed);
     dev_dbg(a->dev, "Received timestamp update for dev=%llx ts=%llx seed=%llx\n", devid, timestamp, update_seed);
 
-    sdev = aaudio_find_dev_by_dev_id(a, devid);
-    aaudio_handle_timestamp(sdev, time_os, timestamp);
-
     aaudio_send_cmd_response(a, &sctx, msg,
             aaudio_msg_write_update_timestamp_response);
+    aaudio_queue_timestamp_work(a, devid, time_os, timestamp);
+}
+
+static void aaudio_handle_timestamp_work(struct work_struct *ws)
+{
+    struct aaudio_timestamp_work_struct *work =
+        container_of(ws, struct aaudio_timestamp_work_struct, ws);
+    struct aaudio_subdevice *sdev;
+
+    if (!work->a->alive)
+        goto out;
+
+    sdev = aaudio_find_dev_by_dev_id(work->a, work->devid);
+    if (!sdev) {
+        dev_dbg(work->a->dev, "Timestamp update for unknown device id=%llx\n", work->devid);
+        goto out;
+    }
+    aaudio_handle_timestamp(sdev, work->os_timestamp, work->dev_timestamp);
+
+out:
+    kfree(work);
+}
+
+static void aaudio_queue_timestamp_work(struct aaudio_device *a, aaudio_device_id_t devid,
+                                        ktime_t os_timestamp, u64 dev_timestamp)
+{
+    struct aaudio_timestamp_work_struct *work;
+
+    if (!a->timestamp_wq || !a->alive)
+        return;
+
+    work = kmalloc(sizeof(*work), GFP_ATOMIC);
+    if (!work) {
+        dev_warn_ratelimited(a->dev, "Dropping timestamp update due to OOM\n");
+        return;
+    }
+
+    INIT_WORK(&work->ws, aaudio_handle_timestamp_work);
+    work->a = a;
+    work->devid = devid;
+    work->os_timestamp = os_timestamp;
+    work->dev_timestamp = dev_timestamp;
+
+    if (!queue_work(a->timestamp_wq, &work->ws))
+        kfree(work);
 }
 
 void aaudio_handle_command(struct aaudio_device *a, struct aaudio_msg *msg)
