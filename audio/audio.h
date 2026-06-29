@@ -83,6 +83,7 @@ struct aaudio_subdevice {
     bool is_pcm;
     struct snd_pcm *pcm;
     struct snd_jack *jack;
+    struct work_struct stop_work;
 };
 struct aaudio_alsa_pcm_id_mapping {
     const char *name;

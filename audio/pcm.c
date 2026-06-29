@@ -1,5 +1,6 @@
 #include "pcm.h"
 #include "audio.h"
+#include <linux/workqueue.h>
 
 static u64 aaudio_get_alsa_fmtbit(struct aaudio_apple_description *desc)
 {
@@ -178,23 +179,29 @@ static void aaudio_pcm_start(struct snd_pcm_substream *substream)
     pr_debug("aaudio: Started the audio device in %lluns\n", ktime_to_ns(time_end - time_start));
 }
 
+static void aaudio_pcm_stop_work(struct work_struct *work)
+{
+    struct aaudio_subdevice *sdev = container_of(work, struct aaudio_subdevice, stop_work);
+    aaudio_cmd_stop_io(sdev->a, sdev->dev_id);
+}
+
 static int aaudio_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
     struct aaudio_subdevice *sdev = snd_pcm_substream_chip(substream);
     struct aaudio_stream *stream = aaudio_pcm_stream(substream);
     pr_debug("aaudio_pcm_trigger %x\n", cmd);
 
-    /* We only supports triggers on the #0 buffer */
     if (substream->number != 0)
         return 0;
     switch (cmd) {
         case SNDRV_PCM_TRIGGER_START:
+            cancel_work_sync(&sdev->stop_work);
             aaudio_pcm_start(substream);
             stream->started = 1;
             break;
         case SNDRV_PCM_TRIGGER_STOP:
-            aaudio_cmd_stop_io(sdev->a, sdev->dev_id);
             stream->started = 0;
+            schedule_work(&sdev->stop_work);
             break;
         default:
             return -EINVAL;
@@ -265,6 +272,7 @@ int aaudio_create_pcm(struct aaudio_subdevice *sdev)
     }
     if (!id_mapping->name)
         sdev->alsa_id = sdev->a->next_alsa_id++;
+    INIT_WORK(&sdev->stop_work, aaudio_pcm_stop_work);
     err = snd_pcm_new(sdev->a->card, sdev->uid, sdev->alsa_id,
             (int) sdev->out_stream_cnt, (int) sdev->in_stream_cnt, &pcm);
     if (err < 0)
