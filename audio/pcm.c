@@ -285,6 +285,10 @@ static void aaudio_handle_stream_timestamp(struct snd_pcm_substream *substream, 
 
     stream = aaudio_pcm_stream(substream);
     snd_pcm_stream_lock_irqsave(substream, flags);
+    if (!stream->started) {
+        snd_pcm_stream_unlock_irqrestore(substream, flags);
+        return;
+    }
     stream->remote_timestamp = timestamp;
     if (stream->waiting_for_first_ts) {
         stream->waiting_for_first_ts = false;
